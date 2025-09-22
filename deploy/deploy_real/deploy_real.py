@@ -35,7 +35,8 @@ class Controller:
         self.obs = np.zeros(config.num_obs, dtype=np.float32)
         self.cmd = np.array([0.0, 0, 0])
         self.counter = 0
-
+        
+        # DDS型通讯，发布与订阅
         if config.msg_type == "hg":
             # g1 and h1_2 use the hg msg type
             self.low_cmd = unitree_hg_msg_dds__LowCmd_()
@@ -59,7 +60,7 @@ class Controller:
 
             self.lowstate_subscriber = ChannelSubscriber(config.lowstate_topic, LowStateGo)
             self.lowstate_subscriber.Init(self.LowStateGoHandler, 10)
-
+            
         else:
             raise ValueError("Invalid msg_type")
 
@@ -71,7 +72,7 @@ class Controller:
             init_cmd_hg(self.low_cmd, self.mode_machine_, self.mode_pr_)
         elif config.msg_type == "go":
             init_cmd_go(self.low_cmd, weak_motor=self.config.weak_motor)
-
+    # 底层状态
     def LowStateHgHandler(self, msg: LowStateHG):
         self.low_state = msg
         self.mode_machine_ = self.low_state.mode_machine
@@ -81,10 +82,12 @@ class Controller:
         self.low_state = msg
         self.remote_controller.set(self.low_state.wireless_remote)
 
+    # 发布控制命令
     def send_cmd(self, cmd: Union[LowCmdGo, LowCmdHG]):
         cmd.crc = CRC().Crc(cmd)
         self.lowcmd_publisher_.Write(cmd)
-
+    
+    # 等待底层链接
     def wait_for_low_state(self):
         while self.low_state.tick == 0:
             time.sleep(self.config.control_dt)
@@ -103,7 +106,8 @@ class Controller:
         # move time 2s
         total_time = 2
         num_step = int(total_time / self.config.control_dt)
-        
+
+        # 组合索引，进行循环发送。
         dof_idx = self.config.leg_joint2motor_idx + self.config.arm_waist_joint2motor_idx
         kps = self.config.kps + self.config.arm_waist_kps
         kds = self.config.kds + self.config.arm_waist_kds
@@ -114,7 +118,8 @@ class Controller:
         init_dof_pos = np.zeros(dof_size, dtype=np.float32)
         for i in range(dof_size):
             init_dof_pos[i] = self.low_state.motor_state[dof_idx[i]].q
-        
+            
+        # 采用均匀平分来分割路径
         # move to default pos
         for i in range(num_step):
             alpha = i / num_step
@@ -168,6 +173,7 @@ class Controller:
             waist_yaw_omega = self.low_state.motor_state[self.config.arm_waist_joint2motor_idx[0]].dq
             quat, ang_vel = transform_imu_data(waist_yaw=waist_yaw, waist_yaw_omega=waist_yaw_omega, imu_quat=quat, imu_omega=ang_vel)
 
+        # 首先生成一个震荡信号，周期是period = 0.8s
         # create observation
         gravity_orientation = get_gravity_orientation(quat)
         qj_obs = self.qj.copy()
@@ -185,6 +191,7 @@ class Controller:
         self.cmd[1] = self.remote_controller.lx * -1
         self.cmd[2] = self.remote_controller.rx * -1
 
+        # obs具体内容：imu的速度（陀螺仪信号），重力方向，控制命令（上面刚定义的，遥控的三个），两个腿关节位置，速度信息，两个腿的action信息，两个震荡信息。
         num_actions = self.config.num_actions
         self.obs[:3] = ang_vel
         self.obs[3:6] = gravity_orientation
@@ -198,7 +205,8 @@ class Controller:
         # Get the action from the policy network
         obs_tensor = torch.from_numpy(self.obs).unsqueeze(0)
         self.action = self.policy(obs_tensor).detach().numpy().squeeze()
-        
+
+        #转换到发送给电机的绝对位置
         # transform action to target_dof_pos
         target_dof_pos = self.config.default_angles + self.action * self.config.action_scale
 
